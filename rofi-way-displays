@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+waydisplays_get () {
+    way-displays -y -g 2>/dev/null
+}
+
+display_opt () {
+    printf -- "%s" "$1"
+    printf -- "\0%s\x1f%s" "info" "$2"
+    shift 2
+    while [[ $# -gt 1 ]]; do
+        printf -- "\x1f%s\x1f%s" "$1" "$2"
+        shift 2
+    done
+    printf -- "\n"
+}
+
+displays_get_current () {
+    waydisplays_get | yq -r '.CFG |
+        "ARRANGE_ALIGN \(.ARRANGE) \(.ALIGN)",
+        (.SCALE[] | "SCALE \(.NAME_DESC) \(.SCALE)"),
+        (to_entries[] |
+            "\(.key) \(.value|if type == "array" then
+                . | map(strings) | join(" ") else . end)"
+        )'
+}
+
+show_current_config () {
+    local key xs
+    while read -r key xs; do
+        if [[ $key == "$1" ]]; then
+            display_opt "$key $xs (current value)" "$key" \
+                nonselectable "true" \
+                active "true" \
+                permanent "true"
+        fi
+    done < <(displays_get_current)
+}
+
+display_name_opts () {
+    local name
+    local -a names
+    mapfile -t names < <(waydisplays_get | yq -r \
+        '.STATE.HEADS[] | .NAME//"", .DESCRIPTION//"" ')
+    for name in "${names[@]}"; do
+        display_opt "$name" "${name@Q}"
+    done
+}
+
+expand_opts () {
+    local str=$1 this next
+    while [[ -n $str ]]; do
+        this=${str%%'|'*}
+        next=${str#*'|'}
+        case $this in
+            '') break ;;
+            '!NAME') display_name_opts ;;
+            '!'*)
+                display_opt "$this" "$this" nonselectable "true"
+                ;;
+            *) display_opt "$this" "$this" ;;
+        esac
+        if [[ $this == "$next" ]]; then
+            break
+        fi
+        str=$next
+    done
+}
+
+declare -A opts=(
+    ['ARRANGE_ALIGN']=' "ROW|COLUMN" "TOP|MIDDLE|BOTTOM|LEFT|RIGHT" '
+    ['SCALING']='       "on|off" ' # Enable scaling, overrides AUTO_SCALE and SCALE
+    ['AUTO_SCALE']='    "on|off"'
+    ['ORDER']='         "!NAME|!REGEX|=END"'
+    ['SCALE']='         "!NAME" "!SCALE"'
+    ['MODE']='          "!NAME" "!width|MAX" "!height" "!hz"' #Specified resolution at its highest refresh.  Optional refresh will choose a mode +-0.5Hz.
+    ['TRANSFORM']='     "!NAME"'
+    ['VRR_OFF']='       "!NAME"'
+    ['DISABLED']='      "!NAME"'
+)
+
+opts['TRANSFORM']+=' "90|180|270|flipped|flipped-90|flipped-180|flipped-270"'
+
+orderpart=" ${opts['ORDER']}"
+for _ in 1 2 3 4 5 6 7; do
+    opts['ORDER']+="$orderpart"
+done
+
+declare -A toggles=(
+    ['SCALING']=''
+    ['AUTO_SCALE']=''
+    ['DISABLED']='!NAME'
+    ['VRR_OFF']='!NAME'
+)
+declare -A deletes=(
+    ['SCALE']='!NAME'
+    ['MODE']='!NAME'
+    ['TRANSFORM']='!NAME'
+    ['DISABLED']='!NAME'
+    ['VRR_OFF']='!NAME'
+    ['CALLBACK_CMD']='!NAME'
+)
+
+commandEndNow=
+
+waydisplays_get_options () {
+    local op=${1-} k
+    case $#,$op in
+        0, | 1,*)
+            echo -en "\0message\x1f way-displays ...\n\0data\x1f\n"
+            for k in "${!opts[@]}"; do
+                display_opt "-s $k ..."$'\t\t'"<i>(set)</i>" \
+                    "--set $k"
+            done
+            for k in "${!toggles[@]}"; do
+                display_opt "-t $k ${toggles["$k"]} "$'\t\t'"<i>(toggle)</i>" \
+                    "--toggle $k"
+            done
+            for k in "${!deletes[@]}"; do
+                display_opt "-t $k ${deletes["$k"]} "$'\t\t'"<i>(delete)</i>" \
+                    "--delete $k"
+            done
+            ;;
+        *,--* )
+            local -a args=("$@")
+            local pos
+            pos=$(($#-1))
+            echo -en "\0data\x1f${*@Q}\n\0message\x1fway-displays $*\n"
+            case $op in
+                --set   ) eval set -- "${opts["$2"]}" ;;
+                --toggle) eval set -- "${toggles["$2"]}" ;;
+                --delete) eval set -- "${deletes["$2"]}" ;;
+            esac
+            if [[ $pos -gt $# || -n $commandEndNow ]]; then
+                echo >&2 "ready: way-displays ${args[*]@Q}"
+                echo -en "\0message\x1fready: way-displays ${args[*]}\n"
+                local output
+                if output=$(way-displays "${args[@]}" 2>/dev/null \
+                    | tr '\n' ' '); then
+                    echo -e "Success!" >&2
+                else
+                    echo -e "the command failed!" >&2
+                fi
+                sleep 0.4
+                display_opt "Run again: ${args[*]}" "" urgent true
+                display_opt "Result: $output" "" \
+                    nonselectable true \
+                    permanent true
+                display_opt "Go back"               "--back" active true
+                display_opt "Reset (back to start)" "--reset" active true
+            else
+                shift "$((pos-1))"
+                expand_opts "$1"
+            fi
+            show_current_config "${args[1]}"
+    esac
+}
+
+if [[ "$*" == "quit" ]]; then
+    exit 0
+fi
+
+case $ROFI_RETV in
+    0)
+        echo >&2 "Initial begin"
+        echo -en "\0prompt\x1fway-displays\n"
+        echo -en "\0markup-rows\x1ftrue\n"
+        waydisplays_get_options
+        echo "quit"
+        ;;
+    1)
+        echo "entry selected: ${ROFI_DATA-} $ROFI_INPUT ${ROFI_INFO-}" >&2
+        if [[ ${ROFI_INFO-} == "--back" || ${ROFI_INFO-} == "=END" ]]; then
+            eval set -- "${ROFI_DATA-}"
+            set -- "${@:1:$#-1}"
+            if [[ ${ROFI_INFO-} == "=END" ]]; then
+                commandEndNow=1
+            fi
+        elif [[ ${ROFI_INFO-} == "--reset" ]]; then
+            set --
+        else
+            eval set -- "${ROFI_DATA-}${ROFI_DATA+ }${ROFI_INFO-}"
+        fi
+        waydisplays_get_options "$@"
+        echo quit
+        ;;
+    2)
+        echo "custom selected: ${ROFI_DATA-} $ROFI_INPUT ${ROFI_INFO-}" >&2
+        info="${ROFI_DATA-}${ROFI_DATA+ }${ROFI_INPUT}"
+        eval set -- "$info"
+        waydisplays_get_options "$@"
+        echo quit
+        ;;
+    3)
+        echo "deleted entry" >&2
+        ;;
+    *)
+        echo "Other command!" >&2
+        ;;
+esac
