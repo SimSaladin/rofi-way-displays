@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+PROGRAM_NAME="rofi-way-displays"
+PROGRAM_VERSION="0.0.1"
+
 # Options that can be set through way-displays
 declare -A opts=(
     [ARRANGE_ALIGN]=' "ROW|COLUMN" "TOP|MIDDLE|BOTTOM|LEFT|RIGHT" '
@@ -191,61 +194,107 @@ waydisplays_get_options () {
 }
 
 # If not running inside rofi, launch ourselves.
-if [[ ! -v ROFI_RETV ]]; then
+relaunch_via_rofi() {
     echo "warning: seemingly not running via rofi!" >&2
     SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
     SCRIPT_NAME=$(basename "$0")
     echo "Attempting to launch self (-show $SCRIPT_DIR/$SCRIPT_NAME).." >&2
     exec rofi -show "way-displays:$SCRIPT_DIR/$SCRIPT_NAME"
-fi
+}
+
+usage() {
+    cat <<__END__
+Usage: $0 [options...]
+       rofi -show way-displays:$(realpath --relative-base="$PWD" "$0")
+
+  -h   --help       Show this usage summary and exit
+  -V   --version    Print version information
+
+This script is intended to be used through the rofi-script
+interface. Listed options are not available in rofi-script mode.
+__END__
+}
+
+printVersionAndExit() {
+    echo "$PROGRAM_NAME $PROGRAM_VERSION"
+    exit
+}
+
+rofiPromptHandler() {
+    case $ROFI_RETV in
+        0)
+            # On first prompt setup the prompt settings. Then display the initial
+            # output.
+            echo "debug: tnitial begin..." >&2
+            echo -en "\0prompt\x1fway-displays\n"
+            echo -en "\0markup-rows\x1ftrue\n"
+            waydisplays_get_options
+            echo "quit"
+            ;;
+        1)
+            # This branch is entered when a presented option was chosen from the
+            # list of options.
+            echo "entry selected: ${ROFI_DATA-} $ROFI_INPUT ${ROFI_INFO-}" >&2
+            if [[ ${ROFI_INFO-} == "--back" || ${ROFI_INFO-} == "=END" ]]; then
+                eval set -- "${ROFI_DATA-}"
+                set -- "${@:1:$#-1}"
+                if [[ ${ROFI_INFO-} == "=END" ]]; then
+                    commandEndNow=1
+                fi
+            elif [[ ${ROFI_INFO-} == "--reset" ]]; then
+                set --
+            else
+                eval set -- "${ROFI_DATA-}${ROFI_DATA+ }${ROFI_INFO-}"
+            fi
+            waydisplays_get_options "$@"
+            echo quit
+            ;;
+        2)
+            # For custom options.
+            echo "custom selected: ${ROFI_DATA-} $ROFI_INPUT ${ROFI_INFO-}" >&2
+            info="${ROFI_DATA-}${ROFI_DATA+ }${ROFI_INPUT}"
+            eval set -- "$info"
+            waydisplays_get_options "$@"
+            echo quit
+            ;;
+        3)
+            # This should not be reached normally ever in this script.
+            echo "deleted entry" >&2
+            ;;
+        *)
+            # Custom key bindings would be handled here.
+            echo "Other command!" >&2
+            ;;
+    esac
+}
 
 # Type quit to exit the prompts right away.
 if [[ "$*" == "quit" ]]; then
     exit 0
 fi
 
-case $ROFI_RETV in
-    0)
-        # On first prompt setup the prompt settings. Then display the initial
-        # output.
-        echo "debug: tnitial begin..." >&2
-        echo -en "\0prompt\x1fway-displays\n"
-        echo -en "\0markup-rows\x1ftrue\n"
-        waydisplays_get_options
-        echo "quit"
-        ;;
-    1)
-        # This branch is entered when a presented option was chosen from the
-        # list of options.
-        echo "entry selected: ${ROFI_DATA-} $ROFI_INPUT ${ROFI_INFO-}" >&2
-        if [[ ${ROFI_INFO-} == "--back" || ${ROFI_INFO-} == "=END" ]]; then
-            eval set -- "${ROFI_DATA-}"
-            set -- "${@:1:$#-1}"
-            if [[ ${ROFI_INFO-} == "=END" ]]; then
-                commandEndNow=1
-            fi
-        elif [[ ${ROFI_INFO-} == "--reset" ]]; then
-            set --
-        else
-            eval set -- "${ROFI_DATA-}${ROFI_DATA+ }${ROFI_INFO-}"
-        fi
-        waydisplays_get_options "$@"
-        echo quit
-        ;;
-    2)
-        # For custom options.
-        echo "custom selected: ${ROFI_DATA-} $ROFI_INPUT ${ROFI_INFO-}" >&2
-        info="${ROFI_DATA-}${ROFI_DATA+ }${ROFI_INPUT}"
-        eval set -- "$info"
-        waydisplays_get_options "$@"
-        echo quit
-        ;;
-    3)
-        # This should not be reached normally ever in this script.
-        echo "deleted entry" >&2
-        ;;
-    *)
-        # Custom key bindings would be handled here.
-        echo "Other command!" >&2
-        ;;
-esac
+# Handle rofi script loop when present...
+if [[ -v ROFI_RETV ]]; then
+    rofiPromptHandler "$@"
+    exit
+fi
+
+# Fallback to parsing options. Might relaunch tie script via rofi below!
+TEMP=$(getopt -n "$0" \
+    --options "hv" \
+    --longoptions "version,help" \
+    -- "$@") || exit $?
+eval set -- "$TEMP"
+unset TEMP
+
+while :; do
+    case $1 in
+        --version|-V ) printVersionAndExit ;;
+        --help|-h) usage; exit ;;
+        --) shift; break ;;
+        * ) echo 'Internal error' >&2; exit 1 ;;
+    esac
+done
+
+# The default action is to launch the script through rofi for prompts.
+relaunch_via_rofi
