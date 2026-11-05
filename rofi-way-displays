@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+#set -x
+
 PROGRAM_NAME="rofi-way-displays"
 PROGRAM_VERSION="0.0.1"
 
@@ -33,18 +35,18 @@ done
 declare -A toggles=(
     [SCALING]=''
     [AUTO_SCALE]=''
-    [DISABLED]='!NAME'
-    [VRR_OFF]='!NAME'
+    [DISABLED]='"!NAME"'
+    [VRR_OFF]='"!NAME"'
 )
 
 # Options that are deletable (-d).
 declare -A deletes=(
-    [SCALE]='!NAME'
-    [MODE]='!NAME'
-    [TRANSFORM]='!NAME'
-    [DISABLED]='!NAME'
-    [VRR_OFF]='!NAME'
-    [CALLBACK_CMD]='!NAME'
+    [SCALE]='"!NAME"'
+    [MODE]='"!NAME"'
+    [TRANSFORM]='"!NAME"'
+    [DISABLED]='"!NAME"'
+    [VRR_OFF]='"!NAME"'
+    [CALLBACK_CMD]='"!NAME"'
 )
 
 # Set this non-null to force the built way-displays command to be executed.
@@ -53,57 +55,111 @@ commandEndNow=${commandEndNow-}
 # way-displays executable wrapper.
 __way-displays() {
     echo "debug: calling way-displays with: ${*@Q}" >&2
-    way-displays "$@" 2>/dev/null
+    if way-displays "$@" 2>/dev/null; then
+        :
+    else
+        ret=$?
+        echo "warning: way-displays returned a non-zero exit code: $ret!" >&2
+        return $ret
+    fi
+}
+
+_cachedGet=
+
+cachedWayDisplaysGet() {
+    if [[ -z ${_cachedGet-} ]]; then
+        _cachedGet=$(__way-displays -y -g)
+    fi
+    cat <<<"$_cachedGet"
 }
 
 # Write a row with attributes:
 #
 #   display_opt value infovalue [key value[ key value [key value[ ... ]]]]
 display_opt () {
-    printf -- %s\\0%s\\x1f%s "$1" info "$2"
+    printf "%s\0%s\x1f%s" "$1" info "$2"
     shift 2
     while [[ $# -gt 0 ]]; do
-        printf -- \\x1f%s\\x1f%s "$1" "$2"
+        printf "\x1f%s\x1f%s" "$1" "$2"
         shift 2
     done
-    printf -- \\n
+    printf "\n"
+}
+
+# Rofi prompt options set
+rofiset(){
+    printf "\0%s\x1f%s\n" "$@"
 }
 
 # Get the current values of various way-displays settings.
 displays_get_current () {
-    __way-displays -y -g | yq -r '.CFG |
+    yq -r '.CFG |
         "ARRANGE_ALIGN \(.ARRANGE) \(.ALIGN)",
-        (.SCALE[] | "SCALE \(.NAME_DESC) \(.SCALE)"),
         (to_entries[] |
             "\(.key) \(.value|if type == "array" then
                 . | map(strings) | join(" ") else . end)")'
+        #(.SCALE[] | "SCALE \(.NAME_DESC) \(.SCALE)"),
 }
 
 # Display current configuration values. Filtered to show only values that are
 # being viewed in the current prompt.
 # TODO customizable current value output format.
 show_current_config () {
-    local key xs
-    while read -r key xs; do
-        [[ $key == "$1" ]] || continue
-        display_opt "$key $xs (current value)" "$key" \
-            nonselectable true \
-            active true \
-            permanent true
-    done < <(displays_get_current)
+    echo "debug: showing current..." >&2
+    displays_get_current | \
+        while read -r key xs; do
+            [[ $key == "$1" ]] || continue
+            display_opt "$key $xs (current value)" "$key" \
+                nonselectable true \
+                active true \
+                permanent true
+        done
+}
+
+# Enabled iff "$1 == true"
+isenabledPP() {
+    if [[ "$1" == true ]]; then
+        colorSpan "#719e07" "${2-"[enabled]"}"
+    else
+        colorSpan "#6c71c4" "${3-"[disabled]"}"
+    fi
+}
+
+colorSpan () {
+    printf "<span color='%s'>%s</span>" "$1" "$2"
 }
 
 # Resolve the names of available displays (for !NAME arguments).
 # TODO more structured output?
 display_name_opts () {
-    local -a names
-    mapfile -t names < <(__way-displays -y -g | yq -r '
-        .STATE.HEADS[] | .NAME // "", .DESCRIPTION // ""
-        ')
-    local name
-    for name in "${names[@]}"; do
-        display_opt "$name" "${name@Q}"
-    done
+    echo "debug: getting display names..." >&2
+    yq -r '.STATE.HEADS[] |
+        "\(.NAME) " +
+        "\(.CURRENT.ENABLED) " +
+        "\(.CURRENT.SCALE) " +
+        "\(.CURRENT.VRR) " +
+        "\(.CURRENT |
+            "\(.MODE.WIDTH)x\(.MODE.HEIGHT)" +
+            "+\(.X)-\(.Y)" +
+            "@\(.MODE.REFRESH_MHZ/1000)"
+        ) " +
+        "\(.DESCRIPTION))"
+        ' \
+        | while read -r \
+                name enabled scale vrr \
+                sizepos description
+        do
+            display_opt "$(printf "%s <b>%-10s</b> [%2.3f] %-30s %s %s" \
+                "$(isenabledPP "$enabled")" \
+                "$name" \
+                "${scale//./,}" \
+                "$sizepos" \
+                "<i>$(isenabledPP "$vrr" " VRR " "NOVRR")</i>" \
+                "$description" \
+                )" \
+                "$name"
+                #active "$enabled"
+        done
 }
 
 # Expand command options. That is, options defined by the "$opts", "$toggles",
@@ -115,7 +171,7 @@ expand_opts () {
         next=${str#*'|'}
         case $this in
             ''     ) break ;;
-            '!NAME') display_name_opts ;;
+            '!NAME') display_name_opts  ;;
             '!'*   ) display_opt "$this" "$this" nonselectable "true" ;;
             *      ) display_opt "$this" "$this" ;;
         esac
@@ -126,24 +182,29 @@ expand_opts () {
 
 # Produce the current prompt action and/or output.
 waydisplays_get_options () {
-
     local OPERATION=${1-}
-
     case $#,$OPERATION in
 
         # In the beginning, the selected command is empty.
         0, | 1,*)
             local k
-            echo -en "\0message\x1f way-displays ...\n\0data\x1f\n"
+            rofiset message '' data ''
             for k in "${!opts[@]}"; do
-                display_opt "-s $k ..."$'\t\t'"<i>(set)</i>" "--set $k"
+                display_opt "$(colorSpan \
+                    "#268bd2" \
+                    '<b>[SET]</b>')"$'\t'"$k"$'\t'"${opts["$k"]//  / }" \
+                    "--set $k"
             done
             for k in "${!toggles[@]}"; do
-                display_opt "-t $k ${toggles["$k"]} "$'\t\t'"<i>(toggle)</i>" \
+                display_opt "$(colorSpan \
+                    "#719e07" \
+                    '<b>[TAP]</b>')"$'\t'"$k"$'\t'"${toggles["$k"]}" \
                     "--toggle $k"
             done
             for k in "${!deletes[@]}"; do
-                display_opt "-t $k ${deletes["$k"]} "$'\t\t'"<i>(delete)</i>" \
+                display_opt "$(colorSpan \
+                    "#dc322f" \
+                    '<b>[DEL]</b>')"$'\t'"$k"$'\t'"${deletes["$k"]}" \
                     "--delete $k"
             done
             ;;
@@ -153,7 +214,7 @@ waydisplays_get_options () {
             local pos
             pos=$(($#-1))
             local -a args=("$@")
-            echo -en "\0data\x1f${*@Q}\n\0message\x1fway-displays $*\n"
+            rofiset data "${*@Q}" message "way-displays $*"
             case $OPERATION in
                 --set   ) eval set -- "${opts["$2"]}"    ;;
                 --toggle) eval set -- "${toggles["$2"]}" ;;
@@ -165,7 +226,7 @@ waydisplays_get_options () {
             if [[ $pos -gt $# || -n $commandEndNow ]]; then
                 local output
                 echo "debug: ready to run: way-displays ${args[*]@Q}" >&2
-                echo -en "\0message\x1fready: way-displays ${args[*]}\n"
+                rofiset message "ready: way-displays ${args[*]}"
                 if output=$(way-displays "${args[@]}" 2>/dev/null \
                     | tr '\n' ' '); then
                     echo -e "Success!" >&2
@@ -176,21 +237,27 @@ waydisplays_get_options () {
                 display_opt "Run again: ${args[*]}" "" urgent true
                 display_opt "Result: $output" "" \
                     nonselectable true permanent true
-                display_opt "Go back"               "--back" active true
-                display_opt "Reset (back to start)" "--reset" active true
+            fi
 
-            else
+            local curcfg
+            curcfg=$(cachedWayDisplaysGet)
+
+            if ! [[ $pos -gt $# || -n $commandEndNow ]]; then
                 # When not executing command, expand the next argument instead:
                 shift $((pos-1))
-                expand_opts "$1"
+                expand_opts "$1" <<<"$curcfg"
             fi
 
             # Always show any relevant current config values. NOTE: this
             # should only be run after any way-displays calls to change
             # settings above, so that the cturrent state is reflected in the
             # output!
-            show_current_config "${args[1]}"
+            show_current_config <<<"$curcfg" "${args[1]}"
     esac
+
+    display_opt "$(colorSpan "green" "Go back")" --back
+    display_opt "$(colorSpan "red" "Reset (back to start)")" --reset
+    display_opt "$(colorSpan "red" "Quit")" --quit
 }
 
 # If not running inside rofi, launch ourselves.
@@ -207,8 +274,10 @@ usage() {
 Usage: $0 [options...]
        rofi -show way-displays:$(realpath --relative-base="$PWD" "$0")
 
-  -h   --help       Show this usage summary and exit
-  -V   --version    Print version information
+  -h   --help          Show this usage summary and exit
+  -V   --version       Print version information
+       --list-names    Lists the display names and properties
+       --list-current  Lisst current values for various options
 
 This script is intended to be used through the rofi-script
 interface. Listed options are not available in rofi-script mode.
@@ -225,11 +294,9 @@ rofiPromptHandler() {
         0)
             # On first prompt setup the prompt settings. Then display the initial
             # output.
-            echo "debug: tnitial begin..." >&2
-            echo -en "\0prompt\x1fway-displays\n"
-            echo -en "\0markup-rows\x1ftrue\n"
+            echo "debug: initial begin..." >&2
+            rofiset prompt way-displays markup-rows true
             waydisplays_get_options
-            echo "quit"
             ;;
         1)
             # This branch is entered when a presented option was chosen from the
@@ -241,13 +308,14 @@ rofiPromptHandler() {
                 if [[ ${ROFI_INFO-} == "=END" ]]; then
                     commandEndNow=1
                 fi
+            elif [[ ${ROFI_INFO-} == "--quit" ]]; then
+                exit 0
             elif [[ ${ROFI_INFO-} == "--reset" ]]; then
                 set --
             else
                 eval set -- "${ROFI_DATA-}${ROFI_DATA+ }${ROFI_INFO-}"
             fi
             waydisplays_get_options "$@"
-            echo quit
             ;;
         2)
             # For custom options.
@@ -255,7 +323,6 @@ rofiPromptHandler() {
             info="${ROFI_DATA-}${ROFI_DATA+ }${ROFI_INPUT}"
             eval set -- "$info"
             waydisplays_get_options "$@"
-            echo quit
             ;;
         3)
             # This should not be reached normally ever in this script.
@@ -282,19 +349,33 @@ fi
 # Fallback to parsing options. Might relaunch tie script via rofi below!
 TEMP=$(getopt -n "$0" \
     --options "hv" \
-    --longoptions "version,help" \
+    --longoptions "version,help,list-names,list-current" \
     -- "$@") || exit $?
 eval set -- "$TEMP"
 unset TEMP
+
+defaultActionEnable=1
 
 while :; do
     case $1 in
         --version|-V ) printVersionAndExit ;;
         --help|-h) usage; exit ;;
+        --list-current)
+            cachedWayDisplaysGet | displays_get_current | tr $'\\0\x1f' '|/'
+            defaultActionEnable=
+            shift
+            ;;
+        --list-names)
+            cachedWayDisplaysGet | display_name_opts | tr $'\\0\x1f' '|/'
+            defaultActionEnable=
+            shift
+            ;;
         --) shift; break ;;
         * ) echo 'Internal error' >&2; exit 1 ;;
     esac
 done
 
 # The default action is to launch the script through rofi for prompts.
-relaunch_via_rofi
+if [[ -n $defaultActionEnable ]]; then
+    relaunch_via_rofi
+fi
