@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+shopt -s extglob
+
 #set -x
 
 PROGRAM_NAME="rofi-way-displays"
@@ -10,17 +12,17 @@ PROGRAM_VERSION="0.0.1"
 # Options that can be set through way-displays
 declare -A opts=(
     [ARRANGE_ALIGN]=' "ROW|COLUMN" "TOP|MIDDLE|BOTTOM|LEFT|RIGHT" '
+    [ORDER]='         "!NAME|!REGEX|=END"'
     # Enable scaling: NOTE: overrides AUTO_SCALE and SCALE
     [SCALING]='       "on|off"'
     [AUTO_SCALE]='    "on|off"'
-    [ORDER]='         "!NAME|!REGEX|=END"'
     [SCALE]='         "!NAME" "!SCALE"'
     # Specified resolution at its highest refresh.
     # Optional refresh will choose a mode +-0.5Hz.
     [MODE]='          "!NAME" "!width|MAX" "!height" "!hz"'
     [TRANSFORM]='     "!NAME"'
-    [VRR_OFF]='       "!NAME"'
     [DISABLED]='      "!NAME"'
+    [VRR_OFF]='       "!NAME"'
 )
 opts[TRANSFORM]+=' "90|180|270|flipped|flipped-90|flipped-180|flipped-270"'
 orderpart=" ${opts[ORDER]}"
@@ -46,14 +48,14 @@ declare -A deletes=(
     [TRANSFORM]='"!NAME"'
     [DISABLED]='"!NAME"'
     [VRR_OFF]='"!NAME"'
-    [CALLBACK_CMD]='"!NAME"'
+    [CALLBACK_CMD]=''
 )
 
 # Set this non-null to force the built way-displays command to be executed.
 commandEndNow=${commandEndNow-}
 
 # way-displays executable wrapper.
-__way-displays() {
+__way-displays () {
     echo "debug: calling way-displays with: ${*@Q}" >&2
     if way-displays "$@" 2>/dev/null; then
         :
@@ -77,6 +79,7 @@ cachedWayDisplaysGet() {
 #
 #   display_opt value infovalue [key value[ key value [key value[ ... ]]]]
 display_opt () {
+    echo "debug: info=${2@Q} ($1) [${*:3}]" >&2
     printf "%s\0%s\x1f%s" "$1" info "$2"
     shift 2
     while [[ $# -gt 0 ]]; do
@@ -87,7 +90,7 @@ display_opt () {
 }
 
 # Rofi prompt options set
-rofiset(){
+rofiset () {
     printf "\0%s\x1f%s\n" "$@"
 }
 
@@ -95,7 +98,7 @@ rofiset(){
 displays_get_current () {
     yq -r '.CFG |
         "ARRANGE_ALIGN \(.ARRANGE) \(.ALIGN)",
-        (to_entries[] |
+        (to_entries[] | select(.value != null) |
             "\(.key) \(.value|if type == "array" then
                 . | map(strings) | join(" ") else . end)")'
         #(.SCALE[] | "SCALE \(.NAME_DESC) \(.SCALE)"),
@@ -119,9 +122,9 @@ show_current_config () {
 # Enabled iff "$1 == true"
 isenabledPP() {
     if [[ "$1" == true ]]; then
-        colorSpan "#719e07" "${2-"[enabled]"}"
+        colorSpan "#719e07" "${2-"[ON]"}"
     else
-        colorSpan "#6c71c4" "${3-"[disabled]"}"
+        colorSpan "#6c71c4" "${3-"[OFF]"}"
     fi
 }
 
@@ -192,7 +195,7 @@ waydisplays_get_options () {
             for k in "${!opts[@]}"; do
                 display_opt "$(colorSpan \
                     "#268bd2" \
-                    '<b>[SET]</b>')"$'\t'"$k"$'\t'"${opts["$k"]//  / }" \
+                    '<b>[SET]</b>')"$'\t'"$k"$'\t'"${opts["$k"]//+([[:space:]])/ }" \
                     "--set $k"
             done
             for k in "${!toggles[@]}"; do
@@ -209,7 +212,7 @@ waydisplays_get_options () {
             done
             ;;
 
-        # When at leat one command paramater has been chosen...
+        # When at least one command paramater has been chosen...
         *,--* )
             local pos
             pos=$(($#-1))
@@ -226,7 +229,9 @@ waydisplays_get_options () {
             if [[ $pos -gt $# || -n $commandEndNow ]]; then
                 local output
                 echo "debug: ready to run: way-displays ${args[*]@Q}" >&2
-                rofiset message "ready: way-displays ${args[*]}"
+                rofiset \
+                    message "ready: way-displays ${args[*]}" \
+                    prompt "apply"
                 if output=$(way-displays "${args[@]}" 2>/dev/null \
                     | tr '\n' ' '); then
                     echo -e "Success!" >&2
@@ -277,25 +282,27 @@ Usage: $0 [options...]
   -h   --help          Show this usage summary and exit
   -V   --version       Print version information
        --list-names    Lists the display names and properties
-       --list-current  Lisst current values for various options
+       --list-current  List current values for various options
 
 This script is intended to be used through the rofi-script
 interface. Listed options are not available in rofi-script mode.
 __END__
 }
 
-printVersionAndExit() {
+printVersionAndExit () {
     echo "$PROGRAM_NAME $PROGRAM_VERSION"
     exit
 }
 
-rofiPromptHandler() {
+rofiPromptHandler () {
     case $ROFI_RETV in
         0)
             # On first prompt setup the prompt settings. Then display the initial
             # output.
             echo "debug: initial begin..." >&2
-            rofiset prompt way-displays markup-rows true
+            rofiset \
+                prompt "select action" \
+                markup-rows true
             waydisplays_get_options
             ;;
         1)
